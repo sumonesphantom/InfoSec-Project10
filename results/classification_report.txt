@@ -1,0 +1,17 @@
+BiLSTM + Attention Phishing Detection - Test Results
+============================================================
+
+Test Metrics:
+  loss: 0.0413
+  compile_metrics: 0.9868
+
+Classification Report:
+              precision    recall  f1-score   support
+
+  Legitimate     0.9822    0.9905    0.9864      7919
+    Phishing     0.9912    0.9834    0.9873      8578
+
+    accuracy                         0.9868     16497
+   macro avg     0.9867    0.9870    0.9868     16497
+weighted avg     0.9869    0.9868    0.9868     16497
+
