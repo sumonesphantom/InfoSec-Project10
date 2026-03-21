@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.preprocess import preprocess_text, load_tokenizer, MAX_SEQUENCE_LENGTH
 from src.model import AttentionLayer, build_attention_extraction_model
+from src.paths import trained_model_path, MODEL_DIR
 
 app = FastAPI(
     title="Phishing Email Detection API",
@@ -27,10 +28,6 @@ app = FastAPI(
 model = None
 attn_model = None
 tokenizer = None
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(PROJECT_ROOT, 'models')
-
 
 class EmailRequest(BaseModel):
     text: str
@@ -55,7 +52,7 @@ async def load_model():
     """Load model and tokenizer on startup."""
     global model, attn_model, tokenizer
 
-    model_path = os.path.join(MODEL_DIR, 'best_model.keras')
+    model_path = trained_model_path()
     tokenizer_path = os.path.join(MODEL_DIR, 'tokenizer.pkl')
 
     if not os.path.exists(model_path):
@@ -66,7 +63,11 @@ async def load_model():
         model_path,
         custom_objects={'AttentionLayer': AttentionLayer}
     )
-    attn_model = build_attention_extraction_model(model)
+    try:
+        model.get_layer('attention')
+        attn_model = build_attention_extraction_model(model)
+    except ValueError:
+        attn_model = None
     tokenizer = load_tokenizer(tokenizer_path)
     print("Model and tokenizer loaded successfully.")
 
@@ -97,20 +98,22 @@ async def predict(email: EmailRequest):
     padded = pad_sequences(seq, maxlen=MAX_SEQUENCE_LENGTH,
                            padding='post', truncating='post')
 
-    # Predict with attention
-    prediction, attention_weights = attn_model.predict(padded, verbose=0)
-    phishing_prob = float(prediction[0][0])
-    is_phishing = phishing_prob >= 0.5
-
-    # Get top attended words
-    tokens = cleaned.split()[:MAX_SEQUENCE_LENGTH]
-    attn_vals = attention_weights[0].flatten()[:len(tokens)]
-    if len(tokens) > 0 and attn_vals.max() > 0:
-        top_indices = np.argsort(attn_vals)[-10:][::-1]
-        top_words = [{"word": tokens[i], "attention": float(attn_vals[i])}
-                     for i in top_indices if i < len(tokens)]
+    if attn_model is not None:
+        prediction, attention_weights = attn_model.predict(padded, verbose=0)
+        phishing_prob = float(prediction[0][0])
+        tokens = cleaned.split()[:MAX_SEQUENCE_LENGTH]
+        attn_vals = attention_weights[0].flatten()[:len(tokens)]
+        if len(tokens) > 0 and len(attn_vals) > 0 and attn_vals.max() > 0:
+            top_indices = np.argsort(attn_vals)[-10:][::-1]
+            top_words = [{"word": tokens[i], "attention": float(attn_vals[i])}
+                         for i in top_indices if i < len(tokens)]
+        else:
+            top_words = []
     else:
+        phishing_prob = float(model.predict(padded, verbose=0)[0][0])
         top_words = []
+
+    is_phishing = phishing_prob >= 0.5
 
     return PredictionResponse(
         prediction="Phishing" if is_phishing else "Legitimate",

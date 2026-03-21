@@ -5,8 +5,12 @@ Handles cleaning, tokenization, and sequence preparation for BiLSTM model.
 
 import re
 import string
+import sys
+import os
 import numpy as np
 import pandas as pd
+import nltk
+from concurrent.futures import ProcessPoolExecutor
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from nltk.tokenize import word_tokenize
@@ -14,15 +18,62 @@ from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from sklearn.model_selection import train_test_split
 import pickle
-import os
 
 
-STOP_WORDS = set(stopwords.words('english'))
+# Loaded lazily via `_ensure_nltk_resources()` so imports don't crash
+# when NLTK corpora haven't been downloaded yet.
+STOP_WORDS = None
 LEMMATIZER = WordNetLemmatizer()
 
 # Maximum sequence length and vocabulary size
 MAX_SEQUENCE_LENGTH = 200
 MAX_VOCAB_SIZE = 50000
+
+
+def _ensure_nltk_resources():
+    """
+    Ensure required NLTK corpora/tokenizers are present.
+    We download them on-demand so training doesn't fail with LookupError.
+    If downloads are blocked/unavailable, we fall back to safer defaults.
+    """
+    global STOP_WORDS
+
+    required = [
+        ('corpora/stopwords', 'stopwords'),
+        ('tokenizers/punkt', 'punkt'),
+        ('corpora/wordnet', 'wordnet'),
+    ]
+    optional = [
+        ('tokenizers/punkt_tab', 'punkt_tab'),
+    ]
+
+    for check_path, resource_name in required:
+        try:
+            nltk.data.find(check_path)
+            continue
+        except LookupError:
+            # If NLTK download is blocked, we don't want training to crash.
+            try:
+                print(f"Downloading NLTK resource: {resource_name} ...")
+                nltk.download(resource_name, quiet=True)
+            except Exception:
+                pass
+
+    for check_path, resource_name in optional:
+        try:
+            nltk.data.find(check_path)
+        except LookupError:
+            try:
+                nltk.download(resource_name, quiet=True)
+            except Exception:
+                pass
+
+    if STOP_WORDS is None:
+        try:
+            STOP_WORDS = set(stopwords.words('english'))
+        except LookupError:
+            # Fallback: no stopword removal
+            STOP_WORDS = set()
 
 
 def clean_text(text):
@@ -46,10 +97,25 @@ def clean_text(text):
 
 def tokenize_and_lemmatize(text):
     """Tokenize, remove stopwords, and lemmatize."""
-    tokens = word_tokenize(text)
-    tokens = [LEMMATIZER.lemmatize(t) for t in tokens
-              if t not in STOP_WORDS and len(t) > 2]
-    return ' '.join(tokens)
+    if STOP_WORDS is None:
+        _ensure_nltk_resources()
+    try:
+        tokens = word_tokenize(text)
+    except LookupError:
+        # punkt not available
+        tokens = text.split()
+
+    cleaned = []
+    for t in tokens:
+        if t in STOP_WORDS or len(t) <= 2:
+            continue
+        try:
+            cleaned.append(LEMMATIZER.lemmatize(t))
+        except LookupError:
+            # wordnet not available
+            cleaned.append(t)
+
+    return ' '.join(cleaned)
 
 
 def preprocess_text(text):
@@ -57,6 +123,37 @@ def preprocess_text(text):
     text = clean_text(text)
     text = tokenize_and_lemmatize(text)
     return text
+
+
+def _ensure_subprocess_pythonpath():
+    """So ProcessPoolExecutor workers can `import src.*` when using spawn (macOS)."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    prev = os.environ.get('PYTHONPATH', '')
+    os.environ['PYTHONPATH'] = root if not prev else f"{root}{os.pathsep}{prev}"
+
+
+def _preprocess_worker_count():
+    raw = os.environ.get('PREPROCESS_WORKERS', '').strip().lower()
+    if raw in ('', 'auto'):
+        return min(os.cpu_count() or 4, 8)
+    try:
+        n = int(raw)
+    except ValueError:
+        return min(os.cpu_count() or 4, 8)
+    return max(0, n)
+
+
+def _parallel_preprocess_texts(texts):
+    """CPU-bound NLTK path; parallelize with processes when worthwhile."""
+    workers = _preprocess_worker_count()
+    n = len(texts)
+    if workers <= 1 or n < 3000:
+        return [preprocess_text(t) for t in texts]
+
+    _ensure_subprocess_pythonpath()
+    chunksize = max(64, n // (workers * 16))
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(preprocess_text, texts, chunksize=chunksize))
 
 
 def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.1, random_state=42):
@@ -68,6 +165,7 @@ def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.1, random_stat
         y_train, y_val, y_test: Labels
         tokenizer: Fitted Keras Tokenizer
     """
+    _ensure_nltk_resources()
     print("Loading dataset...")
     df = pd.read_csv(data_path)
     print(f"Dataset shape: {df.shape}")
@@ -78,7 +176,11 @@ def load_and_preprocess_data(data_path, test_size=0.2, val_size=0.1, random_stat
     df = df[df['text_combined'].str.strip().astype(bool)]
 
     print("\nPreprocessing text...")
-    df['cleaned_text'] = df['text_combined'].apply(preprocess_text)
+    texts = df['text_combined'].astype(str).tolist()
+    workers = _preprocess_worker_count()
+    if workers > 1 and len(texts) >= 3000:
+        print(f"  Using {workers} parallel workers (set PREPROCESS_WORKERS=1 to disable).")
+    df['cleaned_text'] = _parallel_preprocess_texts(texts)
 
     # Remove empty texts after cleaning
     df = df[df['cleaned_text'].str.strip().astype(bool)]

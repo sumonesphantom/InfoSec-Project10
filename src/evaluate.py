@@ -14,16 +14,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.model import AttentionLayer
 from src.train import evaluate_model
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(PROJECT_ROOT, 'models')
-RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
+from src.paths import trained_model_path, RESULTS_DIR, MODEL_DIR
 
 
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
-    model_path = os.path.join(MODEL_DIR, 'best_model.keras')
+    model_path = trained_model_path()
     if not os.path.exists(model_path):
         print("ERROR: No trained model found. Run 'python src/train.py' first.")
         sys.exit(1)

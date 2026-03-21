@@ -18,7 +18,7 @@ from sklearn.metrics import (
 )
 import tensorflow as tf
 from tensorflow.keras.callbacks import (
-    EarlyStopping, ModelCheckpoint, ReduceLROnPlateau, TensorBoard
+    EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 )
 
 # Add project root to path
@@ -28,14 +28,59 @@ from src.preprocess import (
     load_and_preprocess_data, save_tokenizer,
     MAX_SEQUENCE_LENGTH, MAX_VOCAB_SIZE
 )
-from src.model import build_bilstm_attention_model
+from src.model import build_bilstm_attention_model, build_conv_pool_model
+from src.paths import (
+    PROJECT_ROOT, MODEL_DIR, RESULTS_DIR,
+    trained_model_path, milestone_checkpoint_pattern, model_arch,
+)
 
-
-# Paths
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_PATH = os.path.join(PROJECT_ROOT, 'Dataset', 'phishing_email.csv')
-MODEL_DIR = os.path.join(PROJECT_ROOT, 'models')
-RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
+_ATTN = {'AttentionLayer': __import__('src.model', fromlist=['AttentionLayer']).AttentionLayer}
+
+
+def _training_batch_size():
+    default = '512' if model_arch() == 'conv' else '128'
+    return int(os.environ.get('TRAIN_BATCH_SIZE', default))
+
+
+def _jit_compile():
+    return os.environ.get('TF_JIT', '').strip() == '1'
+
+
+def _recurrent_dropout_bilstm():
+    return 0.0 if os.environ.get('FAST_RNN', '').strip() == '1' else 0.1
+
+
+def configure_tensorflow_for_training():
+    """Threads, device logging, optional mixed precision when a GPU is visible."""
+    intra = os.environ.get('TF_INTRA_OP_THREADS', '').strip()
+    inter = os.environ.get('TF_INTER_OP_THREADS', '').strip()
+    if intra.isdigit():
+        tf.config.threading.set_intra_op_parallelism_threads(int(intra))
+    if inter.isdigit():
+        tf.config.threading.set_inter_op_parallelism_threads(int(inter))
+
+    gpus = tf.config.list_physical_devices('GPU')
+    cpus = tf.config.list_physical_devices('CPU')
+    print(f"TensorFlow devices — GPU: {gpus}, CPU: {cpus}")
+
+    if os.environ.get('TF_MIXED_PRECISION', '').strip() == '1':
+        if gpus:
+            tf.keras.mixed_precision.set_global_policy('mixed_float16')
+            print("Mixed precision enabled (TF_MIXED_PRECISION=1).")
+        else:
+            print("TF_MIXED_PRECISION=1 ignored: no GPU visible.")
+
+    if _jit_compile():
+        print("TF_JIT=1: training step will use jit_compile=True (XLA where supported).")
+
+
+def make_tf_dataset(X, y, batch_size, shuffle=False, seed=42):
+    y = np.asarray(y, dtype=np.float32)
+    ds = tf.data.Dataset.from_tensor_slices((X, y))
+    if shuffle:
+        ds = ds.shuffle(min(len(X), 10000), seed=seed, reshuffle_each_iteration=True)
+    return ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 
 def plot_training_history(history, save_dir):
@@ -191,6 +236,18 @@ def evaluate_model(model, X_test, y_test, save_dir):
 
 def train():
     """Main training pipeline."""
+    configure_tensorflow_for_training()
+    arch = model_arch()
+    if arch not in ('bilstm', 'conv'):
+        raise ValueError(f"Unknown MODEL_ARCH={arch!r}; use 'bilstm' or 'conv'.")
+    batch_size = _training_batch_size()
+    ckpt_path = trained_model_path()
+    print(f"Model architecture: {arch} (set MODEL_ARCH=bilstm|conv).")
+    print(f"Checkpoint file: {os.path.basename(ckpt_path)}")
+    print(f"Training batch size: {batch_size} (override with TRAIN_BATCH_SIZE).")
+    if arch == 'bilstm' and os.environ.get('FAST_RNN', '').strip() == '1':
+        print("FAST_RNN=1: LSTM recurrent_dropout=0 for faster steps.")
+
     os.makedirs(MODEL_DIR, exist_ok=True)
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -207,29 +264,42 @@ def train():
 
     # Step 2: Build model
     vocab_size = min(len(tokenizer.word_index) + 1, MAX_VOCAB_SIZE)
-    model = build_bilstm_attention_model(
-        vocab_size=vocab_size,
-        embedding_dim=128,
-        lstm_units=128,
-        attention_units=128,
-        dense_units=64,
-        dropout_rate=0.3,
-        max_sequence_length=MAX_SEQUENCE_LENGTH,
-        learning_rate=0.001
-    )
+    jc = _jit_compile()
+    if arch == 'conv':
+        model = build_conv_pool_model(
+            vocab_size=vocab_size,
+            embedding_dim=128,
+            conv_filters=256,
+            kernel_size=5,
+            dense_units=64,
+            dropout_rate=0.3,
+            max_sequence_length=MAX_SEQUENCE_LENGTH,
+            learning_rate=0.001,
+            jit_compile=jc,
+        )
+    else:
+        model = build_bilstm_attention_model(
+            vocab_size=vocab_size,
+            embedding_dim=128,
+            lstm_units=128,
+            attention_units=128,
+            dense_units=64,
+            dropout_rate=0.3,
+            recurrent_dropout=_recurrent_dropout_bilstm(),
+            max_sequence_length=MAX_SEQUENCE_LENGTH,
+            learning_rate=0.001,
+            jit_compile=jc,
+        )
 
     print("\nModel Summary:")
     model.summary()
 
     # Step 3: Check if a previously trained model exists to resume from
-    pretrained_path = os.path.join(MODEL_DIR, 'best_model.keras')
+    pretrained_path = ckpt_path
     if os.path.exists(pretrained_path):
         print(f"\nFound existing model at {pretrained_path}")
         print("Loading pre-trained weights to resume training...")
-        model = tf.keras.models.load_model(
-            pretrained_path,
-            custom_objects={'AttentionLayer': __import__('src.model', fromlist=['AttentionLayer']).AttentionLayer}
-        )
+        model = tf.keras.models.load_model(pretrained_path, custom_objects=_ATTN)
         # Quick evaluation to decide if retraining is needed
         val_results = model.evaluate(X_val, y_val, verbose=0)
         val_acc = val_results[1]  # accuracy is the second metric
@@ -251,14 +321,14 @@ def train():
         ),
         # Save best model based on validation loss
         ModelCheckpoint(
-            filepath=os.path.join(MODEL_DIR, 'best_model.keras'),
+            filepath=ckpt_path,
             monitor='val_loss',
             save_best_only=True,
             verbose=1
         ),
         # Also save checkpoints at accuracy milestones
         ModelCheckpoint(
-            filepath=os.path.join(MODEL_DIR, 'model_acc_{val_accuracy:.4f}_epoch_{epoch:02d}.keras'),
+            filepath=milestone_checkpoint_pattern(),
             monitor='val_accuracy',
             save_best_only=True,
             verbose=1
@@ -272,16 +342,18 @@ def train():
         ),
     ]
 
-    # Step 4: Train
+    # Step 4: Train (tf.data prefetch overlaps host prep with device work)
+    train_ds = make_tf_dataset(X_train, y_train, batch_size, shuffle=True)
+    val_ds = make_tf_dataset(X_val, y_val, batch_size, shuffle=False)
+
     print("\n" + "="*60)
     print("STARTING TRAINING")
     print("="*60)
 
     history = model.fit(
-        X_train, y_train,
-        validation_data=(X_val, y_val),
+        train_ds,
+        validation_data=val_ds,
         epochs=20,
-        batch_size=64,
         callbacks=callbacks,
         verbose=1
     )
@@ -291,10 +363,7 @@ def train():
 
     # Step 6: Evaluate on test set
     print("\nLoading best model for evaluation...")
-    best_model = tf.keras.models.load_model(
-        os.path.join(MODEL_DIR, 'best_model.keras'),
-        custom_objects={'AttentionLayer': __import__('src.model', fromlist=['AttentionLayer']).AttentionLayer}
-    )
+    best_model = tf.keras.models.load_model(ckpt_path, custom_objects=_ATTN)
     metrics = evaluate_model(best_model, X_test, y_test, RESULTS_DIR)
 
     print("\n" + "="*60)

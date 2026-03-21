@@ -74,8 +74,10 @@ def build_bilstm_attention_model(
     attention_units=128,
     dense_units=64,
     dropout_rate=0.3,
+    recurrent_dropout=0.1,
     max_sequence_length=200,
-    learning_rate=0.001
+    learning_rate=0.001,
+    jit_compile=False,
 ):
     """
     Build a Bidirectional LSTM model with Attention mechanism.
@@ -89,6 +91,8 @@ def build_bilstm_attention_model(
         dropout_rate: Dropout rate for regularization
         max_sequence_length: Maximum input sequence length
         learning_rate: Learning rate for Adam optimizer
+        recurrent_dropout: LSTM recurrent dropout; use 0 for faster training (FAST_RNN=1).
+        jit_compile: If True, compile step with XLA (set TF_JIT=1); may help on some setups.
 
     Returns:
         Compiled Keras Model
@@ -113,7 +117,7 @@ def build_bilstm_attention_model(
             lstm_units,
             return_sequences=True,
             dropout=dropout_rate,
-            recurrent_dropout=0.1,
+            recurrent_dropout=recurrent_dropout,
             kernel_regularizer=regularizers.l2(1e-5),
             name='lstm'
         ),
@@ -131,8 +135,8 @@ def build_bilstm_attention_model(
     x = layers.Dropout(dropout_rate, name='dropout')(x)
     x = layers.Dense(32, activation='relu', name='dense_2')(x)
 
-    # Output layer (binary classification)
-    outputs = layers.Dense(1, activation='sigmoid', name='output')(x)
+    # Output layer (binary classification); float32 head when using mixed_float16 policy
+    outputs = layers.Dense(1, activation='sigmoid', dtype='float32', name='output')(x)
 
     # Build model
     model = Model(inputs=inputs, outputs=outputs, name='BiLSTM_Attention_Phishing')
@@ -145,9 +149,59 @@ def build_bilstm_attention_model(
         metrics=['accuracy',
                  tf.keras.metrics.Precision(name='precision'),
                  tf.keras.metrics.Recall(name='recall'),
-                 tf.keras.metrics.AUC(name='auc')]
+                 tf.keras.metrics.AUC(name='auc')],
+        jit_compile=jit_compile,
     )
 
+    return model
+
+
+def build_conv_pool_model(
+    vocab_size,
+    embedding_dim=128,
+    conv_filters=256,
+    kernel_size=5,
+    dense_units=64,
+    dropout_rate=0.3,
+    max_sequence_length=200,
+    learning_rate=0.001,
+    jit_compile=False,
+):
+    """
+    Embedding + Conv1D + global max pool — much faster on GPU/Metal than BiLSTM+attention.
+    Same padded integer input as the BiLSTM model.
+    """
+    inputs = layers.Input(shape=(max_sequence_length,), name='input')
+    x = layers.Embedding(
+        input_dim=vocab_size,
+        output_dim=embedding_dim,
+        input_length=max_sequence_length,
+        name='embedding',
+    )(inputs)
+    x = layers.SpatialDropout1D(dropout_rate, name='spatial_dropout')(x)
+    x = layers.Conv1D(
+        conv_filters,
+        kernel_size,
+        activation='relu',
+        padding='same',
+        name='conv1d',
+    )(x)
+    x = layers.GlobalMaxPooling1D(name='pool')(x)
+    x = layers.Dropout(dropout_rate, name='dropout')(x)
+    x = layers.Dense(dense_units, activation='relu', name='dense_1')(x)
+    outputs = layers.Dense(1, activation='sigmoid', dtype='float32', name='output')(x)
+
+    model = Model(inputs=inputs, outputs=outputs, name='Conv1D_Phishing')
+    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
+    model.compile(
+        optimizer=optimizer,
+        loss='binary_crossentropy',
+        metrics=['accuracy',
+                 tf.keras.metrics.Precision(name='precision'),
+                 tf.keras.metrics.Recall(name='recall'),
+                 tf.keras.metrics.AUC(name='auc')],
+        jit_compile=jit_compile,
+    )
     return model
 
 

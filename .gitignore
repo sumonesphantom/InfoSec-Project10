@@ -201,6 +201,19 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Kiro Agent
+.kiro/ # ignore kiro agent files
+.kiro/specs/
+
+# VS Code
+.vscode/
+.vscode/settings.json
+.vscode/extensions.json
+.vscode/launch.json
+.vscode/tasks.json
+.vscode/settings.json
+.vscode/settings.json
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

@@ -20,17 +20,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.preprocess import load_tokenizer, preprocess_text, MAX_SEQUENCE_LENGTH
 from src.model import AttentionLayer, build_attention_extraction_model
-
-
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MODEL_DIR = os.path.join(PROJECT_ROOT, 'models')
-RESULTS_DIR = os.path.join(PROJECT_ROOT, 'results')
+from src.paths import trained_model_path, MODEL_DIR, RESULTS_DIR
 
 
 def load_model_and_tokenizer():
     """Load trained model and tokenizer."""
+    path = trained_model_path()
     model = tf.keras.models.load_model(
-        os.path.join(MODEL_DIR, 'best_model.keras'),
+        path,
         custom_objects={'AttentionLayer': AttentionLayer}
     )
     tokenizer = load_tokenizer(os.path.join(MODEL_DIR, 'tokenizer.pkl'))
@@ -140,6 +137,12 @@ def visualize_attention(model, tokenizer, text, save_path=None):
         text: Raw email text
         save_path: Path to save attention visualization
     """
+    try:
+        model.get_layer('attention')
+    except ValueError:
+        print("Skipping attention visualization (conv model has no attention layer).")
+        return None, None, None
+
     # Build attention extraction model
     attn_model = build_attention_extraction_model(model)
 
