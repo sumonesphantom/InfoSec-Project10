@@ -1,0 +1,15 @@
+# Apple Silicon (M1/M2/M3): GPU-accelerated TensorFlow
+# Install in a clean venv after removing the generic CPU wheel:
+#   pip uninstall -y tensorflow tensorflow-cpu
+#   pip install -r requirements-macos-metal.txt
+# Then install the rest of the project deps (nltk, pandas, etc.) from requirements.txt
+# but skip the tensorflow line, e.g.:
+#   grep -v '^tensorflow' requirements.txt | pip install -r /dev/stdin
+#
+# Note: tensorflow-macos on PyPI is pinned to 2.16.x; tensorflow-metal 1.2.0 pairs with it.
+# Standard `pip install tensorflow` on macOS is CPU-only (what you had with TF 2.21).
+
+tensorflow-macos==2.16.2
+tensorflow-metal==1.2.0
+# TensorFlow wheels expect NumPy 1.x ABI (avoid NumPy 2.x import errors)
+numpy>=1.24,<2
