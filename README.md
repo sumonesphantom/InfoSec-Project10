@@ -21,7 +21,8 @@ InfoSec-Project10/
 │   ├── train.py                # Training pipeline with checkpointing
 │   ├── evaluate.py             # Standalone evaluation (no retraining needed)
 │   ├── explain.py              # LIME/SHAP explainability analysis
-│   └── api.py                  # FastAPI REST API for deployment
+│   ├── api.py                  # FastAPI REST API for deployment
+│   └── app.py                  # Streamlit interactive frontend
 ├── notebooks/
 │   └── eda.ipynb               # Exploratory Data Analysis
 ├── models/                     # Saved model weights and tokenizer
@@ -35,7 +36,18 @@ InfoSec-Project10/
 │   ├── metrics.json
 │   ├── confusion_matrix.png
 │   ├── roc_curve.png
-│   └── precision_recall_curve.png
+│   ├── precision_recall_curve.png
+│   ├── training_history.png
+│   ├── label_distribution.png
+│   ├── text_length_analysis.png
+│   ├── top_words.png
+│   ├── phishing_indicators.png
+│   └── explanations/
+│       ├── attention_phishing.png
+│       ├── attention_legitimate.png
+│       ├── lime_phishing.html
+│       └── lime_legitimate.html
+├── screenshots/                # Streamlit app screenshots
 ├── requirements.txt
 ├── Dockerfile
 └── README.md
@@ -43,20 +55,96 @@ InfoSec-Project10/
 
 ## Model Architecture
 
+### BiLSTM + Attention (Default)
+
+```mermaid
+flowchart TD
+    A["Input\n(200 tokens)"] --> B["Embedding\n(128 dimensions)"]
+    B --> C["SpatialDropout1D\n(0.3)"]
+    C --> D["Bidirectional LSTM\n(128 units x 2 directions)"]
+    D --> E["Attention Layer\n(128 units)"]
+    E --> F["BatchNormalization"]
+    F --> G["Dense (64, ReLU)"]
+    G --> H["Dropout (0.3)"]
+    H --> I["Dense (32, ReLU)"]
+    I --> J["Dense (1, Sigmoid)"]
+    J --> K{"Phishing / Legitimate"}
+
+    style A fill:#4A90D9,color:#fff
+    style D fill:#7B68EE,color:#fff
+    style E fill:#FF6B6B,color:#fff
+    style K fill:#2ECC71,color:#fff
 ```
-Input (200 tokens) -> Embedding (128d) -> SpatialDropout1D
-    -> Bidirectional LSTM (128 units per direction, returns sequences)
-    -> Attention Layer (128 units, learns word importance weights)
-    -> BatchNormalization -> Dense (64, ReLU) -> Dropout (0.3)
-    -> Dense (32, ReLU) -> Dense (1, Sigmoid)
+
+### Attention Mechanism Detail
+
+```mermaid
+flowchart LR
+    subgraph BiLSTM Output
+        H["H = [h1, h2, ..., h200]\n(sequence of hidden states)"]
+    end
+
+    H --> S["Score = tanh(H * W + b)"]
+    S --> A["Attention Weights\n= softmax(Score * u)"]
+    A --> C["Context Vector\n= sum(weights * H)"]
+
+    style H fill:#7B68EE,color:#fff
+    style A fill:#FF6B6B,color:#fff
+    style C fill:#2ECC71,color:#fff
+```
+
+> The attention mechanism learns which words in the email are most indicative of phishing, providing interpretability alongside classification.
+
+### Conv1D (Fast Alternative)
+
+```mermaid
+flowchart TD
+    A["Input\n(200 tokens)"] --> B["Embedding\n(128 dimensions)"]
+    B --> C["SpatialDropout1D\n(0.3)"]
+    C --> D["Conv1D\n(256 filters, kernel 5)"]
+    D --> E["GlobalMaxPooling1D"]
+    E --> F["Dropout (0.3)"]
+    F --> G["Dense (64, ReLU)"]
+    G --> H["Dense (1, Sigmoid)"]
+    H --> I{"Phishing / Legitimate"}
+
+    style A fill:#4A90D9,color:#fff
+    style D fill:#F39C12,color:#fff
+    style I fill:#2ECC71,color:#fff
+```
+
+### End-to-End Pipeline
+
+```mermaid
+flowchart LR
+    subgraph Preprocessing
+        R["Raw Email"] --> C["Clean Text\n(lowercase, remove URLs,\nHTML, special chars)"]
+        C --> T["Tokenize &\nLemmatize"]
+        T --> P["Pad/Truncate\nto 200 tokens"]
+    end
+
+    subgraph Model
+        P --> M["BiLSTM + Attention\nor Conv1D"]
+    end
+
+    subgraph Output
+        M --> PR["Phishing Probability"]
+        M --> ATT["Attention Weights\n(BiLSTM only)"]
+        PR --> V{"Verdict:\nPhishing / Legitimate"}
+    end
+
+    style R fill:#4A90D9,color:#fff
+    style M fill:#7B68EE,color:#fff
+    style V fill:#2ECC71,color:#fff
 ```
 
 **Key design choices:**
 - **Bidirectional LSTM**: Captures context from both directions in email text
 - **Attention Mechanism**: Learns which words/phrases are most indicative of phishing, improving interpretability
+- **Conv1D Alternative**: Much faster on GPU/Metal with comparable accuracy, trades attention interpretability for speed
 - **Regularization**: SpatialDropout1D, Dropout, L2 regularization, and BatchNormalization to prevent overfitting
 
-**Total Parameters**: 6,715,777 (25.62 MB)
+**BiLSTM Parameters**: 6,715,777 (25.62 MB)
 
 ## Dataset
 
@@ -167,7 +255,30 @@ Open and run the Jupyter notebook:
 jupyter notebook notebooks/eda.ipynb
 ```
 
-### 5. REST API Deployment
+### 5. Streamlit Frontend
+
+```bash
+streamlit run src/app.py
+```
+
+Opens an interactive web app at `http://localhost:8501` with:
+
+- **Email Analysis** — paste any email or pick from sample phishing/legitimate emails
+- **Verdict Banner** — color-coded phishing (red) or legitimate (green) with confidence score
+- **Attention Visualization** — bar chart of the top words the model focused on, plus highlighted email text
+- **Sidebar** — model accuracy/F1 metrics, evaluation plots (confusion matrix, ROC, precision-recall), and dataset insights
+
+#### Screenshots
+
+| Main View | Phishing Detection | Legitimate Detection |
+|:---------:|:------------------:|:-------------------:|
+| ![Main](screenshots/main.png) | ![Phishing](screenshots/phishing_result.png) | ![Legitimate](screenshots/legitimate_result.png) |
+
+| Attention Analysis | Sidebar Metrics |
+|:-----------------:|:---------------:|
+| ![Attention](screenshots/attention_analysis.png) | ![Sidebar](screenshots/sidebar.png) |
+
+### 6. REST API Deployment
 
 ```bash
 python src/api.py
@@ -206,7 +317,7 @@ curl -X POST http://localhost:8000/predict \
 }
 ```
 
-### 6. Docker Deployment
+### 7. Docker Deployment
 
 ```bash
 docker build -t phishing-detector .
@@ -244,6 +355,7 @@ Test set evaluation (16,497 emails):
 - **Scikit-learn** - Evaluation metrics and data splitting
 - **Pandas / NumPy** - Data manipulation
 - **LIME / SHAP** - Explainable AI for model interpretability
+- **Streamlit** - Interactive web frontend for email analysis
 - **FastAPI** - REST API for model serving
 - **Docker** - Containerization for deployment
 - **Matplotlib / Seaborn** - Visualization
