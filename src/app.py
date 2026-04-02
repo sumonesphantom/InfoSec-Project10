@@ -124,10 +124,10 @@ SAMPLES = {
         "at 10 AM in Conference Room B. Please bring your status updates. "
         "Thanks, Sarah"
     ),
-    "Legitimate: IT update": (
-        "Hello everyone, we will be performing scheduled maintenance on "
-        "the email servers this Saturday from 2-4 AM. No action is required "
-        "on your part. — IT Support"
+    "Legitimate: project update": (
+        "Hi team, just wanted to share that we finished the quarterly report "
+        "ahead of schedule. Great work from everyone on the data analysis. "
+        "I uploaded the final version to the shared drive. — Mike"
     ),
 }
 
